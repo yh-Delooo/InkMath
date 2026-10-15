@@ -4,9 +4,10 @@ import {getImageDirectory} from './imageStorage';
 export const STORAGE_ROOT = RNFS.ExternalStorageDirectoryPath.replace(/\/+$/, '');
 export const SHARED_FOLDERS = ['Document', 'EXPORT', 'MyStyle', 'Note', 'SCREENSHOT', 'INBOX'];
 export const DEFAULT_DIRECTORY = `${STORAGE_ROOT}/SCREENSHOT`;
-export type Preferences = {defaultDirectory: string};
+export type Preferences = {defaultDirectory: string; deleteImportedImageAfterInsert: boolean};
 export const DEFAULT_PREFERENCES: Preferences = {
   defaultDirectory: DEFAULT_DIRECTORY,
+  deleteImportedImageAfterInsert: false,
 };
 
 export function isSharedDirectory(path: string): boolean {
@@ -22,6 +23,7 @@ export async function loadPreferences(): Promise<Preferences> {
   try {
     const value = JSON.parse(await RNFS.readFile(path, 'utf8'));
     return {
+      deleteImportedImageAfterInsert: value?.deleteImportedImageAfterInsert === true,
       defaultDirectory: typeof value?.defaultDirectory === 'string' && isSharedDirectory(value.defaultDirectory)
         ? value.defaultDirectory : DEFAULT_DIRECTORY,
     };
@@ -33,5 +35,5 @@ export async function loadPreferences(): Promise<Preferences> {
 
 export async function savePreferences(value: Preferences): Promise<void> {
   if (!isSharedDirectory(value.defaultDirectory)) { throw new Error('请选择设备上的图片文件夹。'); }
-  await RNFS.writeFile(`${await getImageDirectory()}/preferences.json`, JSON.stringify({defaultDirectory: value.defaultDirectory}), 'utf8');
+  await RNFS.writeFile(`${await getImageDirectory()}/preferences.json`, JSON.stringify({defaultDirectory: value.defaultDirectory, deleteImportedImageAfterInsert: value.deleteImportedImageAfterInsert === true}), 'utf8');
 }

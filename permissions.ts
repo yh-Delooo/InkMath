@@ -14,3 +14,10 @@ export async function ensureFilePermissions(): Promise<void> {
     }
   }
 }
+
+export async function requestDeletePermission(): Promise<boolean> {
+  const permission = 'plugin.permission.FILE:DELETE';
+  if (await PluginManager.hasPermission(permission) === 1) { return true; }
+  const result = await PluginManager.requestPermission(permission, '用于确认插入后删除对应原内容：圈选替换的原笔迹，或你勾选删除的导入图片。');
+  return result === 1 || result === 2;
+}

@@ -24,3 +24,12 @@ test('legacy image deletion is ignored and stripped on saving', async () => {
   await savePreferences({...prefs, deleteAfterInsert: true} as typeof prefs);
   expect(JSON.parse((RNFS.writeFile as jest.Mock).mock.calls[0][1])).toEqual(DEFAULT_PREFERENCES);
 });
+
+test('image deletion defaults off and explicit checkbox value persists', async () => {
+  (RNFS.exists as jest.Mock).mockResolvedValue(false);
+  expect((await loadPreferences()).deleteImportedImageAfterInsert).toBe(false);
+  await savePreferences({...DEFAULT_PREFERENCES, deleteImportedImageAfterInsert: true});
+  (RNFS.exists as jest.Mock).mockResolvedValue(true);
+  (RNFS.readFile as jest.Mock).mockResolvedValue((RNFS.writeFile as jest.Mock).mock.calls[0][1]);
+  expect((await loadPreferences()).deleteImportedImageAfterInsert).toBe(true);
+});

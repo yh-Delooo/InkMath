@@ -5,13 +5,13 @@ jest.mock('sn-plugin-lib', () => ({PluginManager: {
   hasPermission: jest.fn(async () => 1), requestPermission: jest.fn(),
   registerButtonListener: jest.fn(() => ({remove: jest.fn()})), closePluginView: jest.fn(),
 }}));
-jest.mock('react-native-fs', () => ({stat: jest.fn(async () => ({size: 100})), readFile: jest.fn(async () => 'abc')}));
+jest.mock('react-native-fs', () => ({hash: jest.fn(async () => 'hash'), stat: jest.fn(async () => ({size: 100})), readFile: jest.fn(async () => 'abc')}));
 jest.mock('react-native-view-shot', () => 'ViewShot');
 jest.mock('react-native-svg', () => ({SvgXml: 'SvgXml'}));
 jest.mock('../components/FilePicker', () => ({FilePicker: () => null}));
 jest.mock('../components/OcrCrop', () => ({OcrCrop: () => null}));
 jest.mock('../components/ProviderSettings', () => ({ProviderSettings: () => null}));
-jest.mock('../permissions', () => ({ensureFilePermissions: async () => {}}));
+jest.mock('../permissions', () => ({ensureFilePermissions: async () => {}, requestDeletePermission: async () => true}));
 jest.mock('../preferences', () => ({DEFAULT_PREFERENCES: {}, loadPreferences: async () => ({}), savePreferences: jest.fn()}));
 jest.mock('../src/storage', () => ({loadHistory: async () => []}));
 jest.mock('../src/keyStorage', () => ({loadKey: async () => 'test-key'}));
@@ -35,7 +35,8 @@ test('image tab has upload only, with 2:1 return/cancel controls', async () => {
   await act(async () => button('图片识别').props.onPress());
   expect(button('选择图片')).toBeTruthy();
   expect(button('识别当前套索')).toBeUndefined();
-  expect(screenText()).not.toContain('删除');
+  expect(screenText()).toContain('插入成功后删除原图片');
+  expect(screenText()).not.toContain('删除原手写');
 });
 
 test('cancel releases controls and a late response cannot replace the formula', async () => {

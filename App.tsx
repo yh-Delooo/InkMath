@@ -6,9 +6,9 @@ import RNFS from 'react-native-fs';
 import {PluginManager} from 'sn-plugin-lib';
 import {FilePicker} from './components/FilePicker';
 import {OcrCrop} from './components/OcrCrop';
-import {ensureFilePermissions} from './permissions';
+import {ensureFilePermissions, requestDeletePermission} from './permissions';
 import {DEFAULT_PREFERENCES, loadPreferences, savePreferences, Preferences} from './preferences';
-import {insertImage} from './insertImage';
+import {insertImage, ImportedImage} from './insertImage';
 import {renderEquation} from './src/render';
 import {latexToExpression, plotSvg, plotLayout, Range} from './src/math';
 import {transcribe} from './src/llm';
@@ -42,6 +42,8 @@ export default function App() {
   const [preview, setPreview] = useState<Preview | null>(null), [laidOut, setLaidOut] = useState(false);
   const [status, setStatus] = useState('正在读取设置…'), [picker, setPicker] = useState(false);
   const [ocrPath, setOcrPath] = useState('');
+  const [importedImage, setImportedImage] = useState<ImportedImage | null>(null);
+  const [recognizedImage, setRecognizedImage] = useState<ImportedImage | null>(null);
   const [provider, setProvider] = useState<ProviderConfig>({...DEFAULT_PROVIDER}), [appKey, setAppKey] = useState('');
   const [selectedRecordId, setSelectedRecordId] = useState('');
   const [records, setRecords] = useState<FormulaRecord[]>([]);
@@ -83,7 +85,7 @@ export default function App() {
     try { await action(); } catch (e) { error(e); } finally { lock.current = false; setBusy(false); }
   };
   const openEntry = async (lasso: boolean, plotOnly = false) => {
-    const ticket = ++serial.current; selection.current = null; invalidate(); setPicker(false); setOcrPath(''); setAppKey('');
+    const ticket = ++serial.current; selection.current = null; invalidate(); setPicker(false); setOcrPath(''); setImportedImage(null); setRecognizedImage(null); setAppKey('');
     try {
       await ensureFilePermissions();
       const preferences = await loadPreferences(), history = await loadHistory(), savedProvider = await loadProvider();
@@ -115,10 +117,11 @@ export default function App() {
     return () => { serial.current++; recognition.current?.abort(); if (saveTimer.current) { void persistSettings().catch(() => {}); } sub.remove(); };
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
   const updatePrefs = (change: Partial<Preferences>) => run(async () => {
+    if (change.deleteImportedImageAfterInsert && !await requestDeletePermission()) { throw new Error('未获得删除权限，选项保持关闭。'); }
     const next = {...prefs, ...change}; await savePreferences(next); setPrefs(next);
   });
   const chooseFormula = (r: FormulaRecord) => {
-    invalidate(); selection.current = null; setLatex(r.latex);
+    invalidate(); selection.current = null; setRecognizedImage(null); setLatex(r.latex);
     try { setExpression(latexToExpression(r.latex)); setTab('plot'); setStatus('已选择公式，请生成图像并检查范围。'); }
     catch (e) { setTab('equation'); error(e); }
   };
@@ -138,22 +141,23 @@ export default function App() {
     const saved = preview; await ensureFilePermissions();
     const path = await savePng(await shot.current.capture()), hash = await RNFS.hash(path, 'sha256');
     const handwriting = saved.kind === 'equation' && selection.current;
-    const result = handwriting ? {warning: await insertRecognizedFormula(handwriting, path)}
-      : await insertImage(path);
+    const result = handwriting ? await insertRecognizedFormula(handwriting, path, previewWidth / (previewWidth / saved.aspect + 24))
+      : await insertImage(path, saved.kind === 'equation' && prefs.deleteImportedImageAfterInsert ? recognizedImage : null);
     selection.current = null;
     // Insertion already committed: a history failure must never invite a second insertion.
-    invalidate(); setOcrPath('');
+    invalidate(); setOcrPath(''); setImportedImage(null); setRecognizedImage(null);
     let warning = result.warning || '';
-    if (saved.kind === 'equation') {
+    if (saved.kind === 'equation' && (!handwriting || !warning)) {
       try {
         await saveRecord({id: path, path, hash, latex: saved.latex, created: Date.now()}); const updated = await loadHistory(); setRecords(updated); setSelectedRecordId(updated[0]?.id || ''); }
       catch { warning += '\n公式已插入，但本地记录保存失败，之后可能需要重新识别。'; }
     }
     if (handwriting && !warning) { PluginManager.closePluginView(); return; }
-    Alert.alert('已插入笔记', warning || '返回笔记后可移动、缩放；再次圈选公式可点“一键绘图”。',
+    Alert.alert(warning ? '请检查笔记' : '已插入笔记', warning || '返回笔记后可移动、缩放；再次圈选公式可点“一键绘图”。',
       [{text: '返回笔记', onPress: () => PluginManager.closePluginView()}, {text: '继续'}]);
   });
-  const recognizePath = async (imagePath: string, config: ProviderConfig, key: string) => {
+  const recognizePath = async (imagePath: string, config: ProviderConfig, key: string, original: ImportedImage | null = null) => {
+    setRecognizedImage(null);
     const controller = new AbortController();
     recognition.current = controller; setRecognizing(true);
     const step = <T,>(action: () => Promise<T>) => abortable(action, controller.signal);
@@ -173,7 +177,7 @@ export default function App() {
         signal: controller.signal, onProgress: percent => { if (!controller.signal.aborted) { setStatus(`${percent}%……`); } },
       }));
       if (controller.signal.aborted) { throw new RecognitionCancelled(); }
-      invalidate(); setLatex(result.latex); setTab('equation');
+      invalidate(); setRecognizedImage(original); setLatex(result.latex); setTab('equation');
       setPreview({...renderEquation(result.latex), kind: 'equation', latex: result.latex, revision: revision.current});
       setStatus('100% · 请核对公式，确认后插入笔记。' + (result.warning ? ` 模型提示：${result.warning}` : ''));
     } catch (e) {
@@ -183,10 +187,11 @@ export default function App() {
       if (recognition.current === controller) { recognition.current = null; setRecognizing(false); }
     }
   };
-  const recognizeImage = () => run(() => recognizePath(ocrPath, provider, appKey));
+  const recognizeImage = () => run(() => recognizePath(ocrPath, provider, appKey, importedImage));
   const previewWidth = preview ? Math.max(1, Math.min(window.width - 40, 360 * preview.aspect)) : 1;
   if (picker && ready) { return <FilePicker onSelect={path => { void run(async () => {
-    invalidate(); selection.current = null; setOcrPath(path); setPicker(false); setTab('ocr');
+    const hash = await RNFS.hash(path, 'sha256');
+    invalidate(); selection.current = null; setImportedImage({path, hash}); setRecognizedImage(null); setOcrPath(path); setPicker(false); setTab('ocr');
   }); }} onClose={() => setPicker(false)} initialDirectory={prefs.defaultDirectory}
     defaultDirectory={prefs.defaultDirectory} onSetDefaultDirectory={path => { void updatePrefs({defaultDirectory: path}); }} settingsBusy={busy}/>; }
   const pageHeader = <>
@@ -217,7 +222,7 @@ export default function App() {
         <Pressable accessibilityRole="button" accessibilityLabel="重新编辑所选公式" disabled={disabled}
           style={{...actionStyle, backgroundColor: '#fff'}} onPress={() => {
             if (!selected) { return; }
-            invalidate(); selection.current = null; setOcrPath('');
+            invalidate(); selection.current = null; setOcrPath(''); setImportedImage(null); setRecognizedImage(null);
             setLatex(selected.latex); setTab('equation'); setStatus('已载入所选公式，可修改 LaTeX 后预览并插入。');
           }}>
           <Text style={{color: '#000', fontSize: 17, textAlign: 'center'}}>重新编辑所选公式</Text>
@@ -260,7 +265,15 @@ export default function App() {
       {tab === 'settings' && <ProviderSettings value={provider} onChange={changeProvider} apiKey={appKey} onKey={changeKey}
         onCommit={() => { void persistSettings().catch(error); }} saving={saveStatus}/>}
       {tab === 'ocr' && <>
-        {!!ocrPath && <OcrCrop key={ocrPath} path={ocrPath} onCrop={setOcrPath} onError={error}/>}
+        {!!ocrPath && <OcrCrop key={ocrPath} path={ocrPath} onCrop={path => { invalidate(); setRecognizedImage(null); setOcrPath(path); }} onError={error}/>}
+        <Pressable accessibilityRole="checkbox" accessibilityLabel="插入成功后删除原图片" accessibilityState={{checked: !!prefs.deleteImportedImageAfterInsert, disabled: busy}}
+          disabled={busy} onPress={() => { void updatePrefs({deleteImportedImageAfterInsert: !prefs.deleteImportedImageAfterInsert}); }}
+          style={{flexDirection: 'row', alignItems: 'center', gap: 10, paddingVertical: 12, minHeight: 48}}>
+          <View style={{width: 24, height: 24, borderWidth: 2, borderColor: '#000', alignItems: 'center', justifyContent: 'center'}}>
+            <Text style={{color: '#000', fontSize: 18, lineHeight: 20}}>{prefs.deleteImportedImageAfterInsert ? '✓' : ''}</Text>
+          </View>
+          <Text style={{color: '#000', fontSize: 17, flexShrink: 1}}>插入成功后删除原图片</Text>
+        </Pressable>
         <Button title="上传预览图片并识别" disabled={!ocrPath || !provider.model || !provider.endpoint || !appKey} onPress={recognizeImage}/>
       </>}
       {preview && <>
@@ -270,7 +283,7 @@ export default function App() {
           style={{width: previewWidth, height: previewWidth / preview.aspect + 24, paddingVertical: 12, backgroundColor: '#fff'}}>
           <SvgXml xml={preview.svg} width={previewWidth} height={previewWidth / preview.aspect} onError={e => { invalidate(); error(e); }}/>
         </ViewShot>
-        <Button title={preview.kind === 'equation' ? '确认并插入公式' : '插入函数图像'} disabled={!laidOut || busy} onPress={insert}/>
+        <Button title={preview.kind === 'equation' ? (selection.current ? '确认并替换原笔迹' : '确认并插入公式') : '插入函数图像'} disabled={!laidOut || busy} onPress={insert}/>
       </>}
     </View>}
   </KeyboardPage>;
