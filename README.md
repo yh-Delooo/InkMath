@@ -63,7 +63,7 @@ npm test -- --runInBand
 
 `npm ci` 会执行本项目的原生缓存目录修补脚本；构建时保留此步骤。仓库包含 Android 模板的公开 debug keystore，用于开发构建。GitHub Actions 执行类型和单元检查。
 
-0.1.15 已通过类型检查、157 项测试和 JavaScript 生产构建，自动替换功能已由用户实机验证。本次安装包复用 0.1.1 未修改的原生载荷。
+0.1.16 已通过类型检查、160 项测试和 JavaScript 生产构建，自动替换功能已由用户实机验证。本次安装包复用 0.1.1 未修改的原生载荷。
 
 ## 目录
 
@@ -76,7 +76,7 @@ npm test -- --runInBand
 | `__tests__/` | 单元测试 |
 | `third-party-licenses/` | 第三方依赖许可文本 |
 
-版本：0.1.15。插件 ID：`snmllm4e9a6c2f8b`，pluginKey：`supernote_math_llm`。
+版本：0.1.16。插件 ID：`snmllm4e9a6c2f8b`，pluginKey：`supernote_math_llm`。
 
 ## 来源与许可
 

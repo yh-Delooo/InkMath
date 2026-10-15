@@ -126,7 +126,7 @@ function pictureSnapshot(elements: any[]): object[] {
 }
 async function saveReplacementDiagnostic(data: object): Promise<string> {
   // Only structural metadata, never note paths, handwriting points or API keys.
-  const text = JSON.stringify({version: '0.1.15', ...data}, null, 2);
+  const text = JSON.stringify({version: '0.1.16', ...data}, null, 2);
   try {
     const dir = `${RNFS.ExternalStorageDirectoryPath}/EXPORT`;
     await RNFS.mkdir(dir);
@@ -363,7 +363,19 @@ export async function insertRecognizedFormula(s: Selection, path: string, aspect
       // No handwriting is permitted in this retry selection. The normal flow
       // already handles original-stroke overlap before reaching this point.
       await selectImportedImage(image, size, s, diagnostic, [], before, true);
+      // Reload alone has left a valid-looking but ineffective native lasso on
+      // devices. Explicitly rebuild its UI state before the bounded retry.
+      diagnostic.stage = 'rebuild-image-lasso';
+      accepted(await PluginCommAPI.setLassoBoxState(2), '清除旧套索状态');
+      await selectImportedImage(image, size, s, diagnostic, [], before, true);
+      accepted(await PluginCommAPI.setLassoBoxState(0), '显示新公式套索');
+      await new Promise(resolve => setTimeout(resolve, 100));
       await validate(s);
+      const live = checked<any[]>(await PluginCommAPI.getLassoElements(), '核验移动前选区');
+      diagnostic.retrySelection = pictureSnapshot(live);
+      if (live.length !== 1 || live[0].type !== 200 || live[0].numInPage !== image.numInPage || live[0].layerNum !== image.layerNum) {
+        throw new Error('移动前选区发生变化，已停止重试。[R3-选区]');
+      }
       diagnostic.stage = 'retry-resize-image';
       accepted(await PluginCommAPI.resizeLassoRect(target), '重新定位新公式 [R3-重试]');
     }

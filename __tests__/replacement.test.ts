@@ -2,7 +2,7 @@ jest.mock('react-native-fs', () => ({hash: jest.fn(async () => 'formula-hash'), 
 import RNFS from 'react-native-fs';
 jest.mock('../imageStorage', () => ({getImageDirectory: async () => '/plugin'}));
 jest.mock('sn-plugin-lib', () => ({
-  PluginCommAPI: {getLassoElements: jest.fn(), getLassoRect: jest.fn(), getCurrentFilePath: jest.fn(), getCurrentPageNum: jest.fn(), modifyPageElements: jest.fn(), lassoElements: jest.fn(), resizeLassoRect: jest.fn(), deletePageElements: jest.fn(), getPageDisplaySize: jest.fn(), reloadFile: jest.fn()},
+  PluginCommAPI: {setLassoBoxState: jest.fn(), getLassoElements: jest.fn(), getLassoRect: jest.fn(), getCurrentFilePath: jest.fn(), getCurrentPageNum: jest.fn(), modifyPageElements: jest.fn(), lassoElements: jest.fn(), resizeLassoRect: jest.fn(), deletePageElements: jest.fn(), getPageDisplaySize: jest.fn(), reloadFile: jest.fn()},
   PluginFileAPI: {getElements: jest.fn()}, PluginNoteAPI: {saveCurrentNote: jest.fn(), insertImage: jest.fn()},
   PointUtils: {androidPoint2Emr: (p: any) => ({x: 2000 - p.y * 2, y: p.x * 2}), emrPoint2Android: (p: any) => ({x: p.y / 2, y: (2000 - p.x) / 2})},
 }));
@@ -18,7 +18,7 @@ const stroke = (id = 1, x = 10) => ({type: 0, numInPage: id, pageNum: 0, layerNu
     pressures: accessor([2, 3]), eraseLineTrailNums: accessor([]), flagDraw: accessor([]), markPenDirection: accessor([])}});
 let elements: any[];
 beforeEach(() => {
-  jest.resetAllMocks(); (RNFS.exists as jest.Mock).mockResolvedValue(true); (RNFS.hash as jest.Mock).mockResolvedValue('formula-hash'); elements = [stroke(), stroke(2, 50)];
+  jest.resetAllMocks(); (C.setLassoBoxState as jest.Mock).mockResolvedValue(ok(true)); (RNFS.exists as jest.Mock).mockResolvedValue(true); (RNFS.hash as jest.Mock).mockResolvedValue('formula-hash'); elements = [stroke(), stroke(2, 50)];
   (requestDeletePermission as jest.Mock).mockResolvedValue(true);
   (C.getLassoElements as jest.Mock).mockResolvedValue(ok([stroke()]));
   (C.getLassoRect as jest.Mock).mockResolvedValue(ok({left: 10, top: 20, right: 110, bottom: 120}));
@@ -458,4 +458,50 @@ test('a failed recovery refresh does not retry the move or delete originals', as
   expect(C.resizeLassoRect).toHaveBeenCalledTimes(1);
   expect(N.insertImage).toHaveBeenCalledTimes(1);
   expect(C.deletePageElements).not.toHaveBeenCalled();
+});
+
+
+test('retry rebuilds the native lasso before resizing an otherwise inert selection', async () => {
+  let reset = false, shown = false;
+  const resize = (C.resizeLassoRect as jest.Mock).getMockImplementation()!;
+  (C.setLassoBoxState as jest.Mock).mockImplementation(async state => {
+    if (state === 2) { reset = true; }
+    if (state === 0 && reset) { shown = true; }
+    return ok(true);
+  });
+  (C.resizeLassoRect as jest.Mock).mockImplementation(async target => shown ? resize(target) : ok(true));
+  expect(await replace()).toEqual({warning: ''});
+  expect(C.setLassoBoxState).toHaveBeenNthCalledWith(1, 2);
+  expect(C.setLassoBoxState).toHaveBeenNthCalledWith(2, 0);
+  expect(N.insertImage).toHaveBeenCalledTimes(1);
+});
+
+test('a selection changed while showing the lasso cannot authorize retry', async () => {
+  (C.resizeLassoRect as jest.Mock).mockResolvedValue(ok(true));
+  (C.setLassoBoxState as jest.Mock).mockImplementation(async state => {
+    if (state === 0) { (C.getLassoElements as jest.Mock).mockResolvedValue(ok([stroke(2, 50)])); }
+    return ok(true);
+  });
+  expect((await replace()).warning).toContain('移动前选区发生变化');
+  expect(C.resizeLassoRect).toHaveBeenCalledTimes(1);
+  expect(C.deletePageElements).not.toHaveBeenCalled();
+});
+
+test('history images with changing page-local numbers are preserved during a later replacement', async () => {
+  const historyRect = {left: 700, top: 200, right: 900, bottom: 300};
+  elements.push({uuid: 'history-image', type: 200, pageNum: 0, layerNum: 0, numInPage: 80, picture: {rect: {...historyRect}}});
+  const insert = (N.insertImage as jest.Mock).getMockImplementation()!;
+  (N.insertImage as jest.Mock).mockImplementation(async path => {
+    await insert(path);
+    elements.find(e => e.uuid === 'history-image').numInPage = 86;
+    elements.find(e => e.uuid === 'native-image').numInPage = 87;
+    (C.getLassoElements as jest.Mock).mockImplementation(async () => ok(elements.filter(e => e.numInPage === 87)));
+    return ok(true);
+  });
+  (C.resizeLassoRect as jest.Mock).mockImplementation(async target => {
+    elements.find(e => e.numInPage === 87).picture.rect = {...target}; return ok(true);
+  });
+  expect(await replace()).toEqual({warning: ''});
+  expect(elements.find(e => e.uuid === 'history-image').picture.rect).toEqual(historyRect);
+  expect(C.deletePageElements).toHaveBeenCalledWith([1], 0, 0);
 });
