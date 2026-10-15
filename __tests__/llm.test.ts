@@ -51,3 +51,50 @@ describe('image request adapter', () => {
     await expect(transcribe({base64: 'abc', mime: 'image/png'}, PRESETS[0], 'secret-value', fn)).rejects.toThrow('401');
   });
 });
+
+describe('cancellation, timeouts and HTTP diagnostics', () => {
+  const image = {base64: 'abc', mime: 'image/png'};
+  afterEach(() => jest.useRealTimers());
+  test('503 explains temporary service failure without exposing response body', async () => {
+    const fn = jest.fn().mockResolvedValue({ok: false, status: 503, json: jest.fn(() => ({error: {message: 'secret'}}))});
+    await expect(transcribe(image, PRESETS[0], 'secret', fn)).rejects.toThrow('服务端或中间网关暂不可用');
+  });
+  test('pre-cancelled recognition never sends a request', async () => {
+    const controller = new AbortController(), fn = jest.fn(); controller.abort();
+    await expect(transcribe(image, PRESETS[0], 'key', fn, {signal: controller.signal})).rejects.toThrow('已取消识别');
+    expect(fn).not.toHaveBeenCalled();
+  });
+  test('cancellation releases a hanging transport and aborts the actual request', async () => {
+    const controller = new AbortController();
+    const fn = jest.fn(() => new Promise<Response>(() => {}));
+    const pending = transcribe(image, PRESETS[0], 'key', fn, {signal: controller.signal});
+    const assertion = expect(pending).rejects.toThrow('已取消识别');
+    await Promise.resolve(); controller.abort();
+    await assertion;
+    expect((fn.mock.calls as any)[0][1].signal.aborted).toBe(true);
+  });
+  test('timeout releases a transport even when it ignores AbortSignal', async () => {
+    jest.useFakeTimers();
+    const pending = transcribe(image, PRESETS[0], 'key', jest.fn(() => new Promise<Response>(() => {})));
+    const assertion = expect(pending).rejects.toThrow('未收到完整响应');
+    await jest.advanceTimersByTimeAsync(90000); await assertion;
+    expect(jest.getTimerCount()).toBe(0);
+  });
+  test('cancellation while reading response discards late results', async () => {
+    const controller = new AbortController(), progress = jest.fn();
+    let complete!: (data: unknown) => void;
+    const json = jest.fn(() => new Promise(resolve => { complete = resolve; }));
+    const pending = transcribe(image, PRESETS[0], 'key', jest.fn().mockResolvedValue({ok: true, json}), {signal: controller.signal, onProgress: progress});
+    const assertion = expect(pending).rejects.toThrow('已取消识别');
+    for (let i = 0; i < 5; i++) { await Promise.resolve(); }
+    expect(json).toHaveBeenCalled();
+    controller.abort(); await assertion; complete(result());
+    expect(progress.mock.calls).toEqual([[40], [80]]);
+  });
+  test('timeout includes response-read stage', async () => {
+    jest.useFakeTimers();
+    const pending = transcribe(image, PRESETS[0], 'key', jest.fn().mockResolvedValue({ok: true, json: () => new Promise(() => {})}));
+    const assertion = expect(pending).rejects.toThrow('已收到响应');
+    await jest.advanceTimersByTimeAsync(90000); await assertion;
+  });
+});

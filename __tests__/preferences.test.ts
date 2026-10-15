@@ -15,3 +15,12 @@ test('legacy enabled deletion setting is ignored and omitted when saved', async 
   await savePreferences(prefs);
   expect((RNFS.writeFile as jest.Mock).mock.calls[0][1]).not.toContain('deleteHandwriting');
 });
+
+test('legacy image deletion is ignored and stripped on saving', async () => {
+  (RNFS.exists as jest.Mock).mockResolvedValue(true);
+  (RNFS.readFile as jest.Mock).mockResolvedValue(JSON.stringify({...DEFAULT_PREFERENCES, deleteAfterInsert: true}));
+  const prefs = await loadPreferences();
+  expect(prefs).not.toHaveProperty('deleteAfterInsert');
+  await savePreferences({...prefs, deleteAfterInsert: true} as typeof prefs);
+  expect(JSON.parse((RNFS.writeFile as jest.Mock).mock.calls[0][1])).toEqual(DEFAULT_PREFERENCES);
+});

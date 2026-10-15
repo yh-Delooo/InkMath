@@ -25,7 +25,7 @@
 
 模型被要求返回 `{"latex":"...","uncertainty":"..."}`。支持 JSON 代码围栏，移除单独的 `<think>` 区块；无效 JSON、空公式、截断、拒绝或工具调用会报错。返回的公式需要用户确认，模型的不确定性会显示在界面上，不能把没有警告等同于识别正确。
 
-默认最多 4096 输出 token，90 秒超时，无自动重试。MiniMax M3 用 `max_completion_tokens` 并关闭 thinking；Kimi K3 用 `reasoning_effort=low`；其他默认只传 `max_tokens`，不强行设置 temperature。专用参数只对地址/模型保持原样的对应预设生效。自定义接口必须支持这些通用 Chat Completions 参数及非流式响应；Responses、Anthropic Messages 和需要额外签名的接口未实现。
+默认最多 4096 输出 token，90 秒超时，无自动重试；支持取消识别，取消后忽略迟到结果。界面仅显示阶段百分比（10/20/40/80/100），不代表服务端实时完成比例。HTTP 503 表示服务端或网关暂不可用；DeepSeek 官方定义为服务器繁忙，不应仅凭 503 判断密钥错误或余额不足。MiniMax M3 用 `max_completion_tokens` 并关闭 thinking；Kimi K3 用 `reasoning_effort=low`；其他默认只传 `max_tokens`，不强行设置 temperature。专用参数只对地址/模型保持原样的对应预设生效。自定义接口必须支持这些通用 Chat Completions 参数及非流式响应；Responses、Anthropic Messages 和需要额外签名的接口未实现。
 
 设置自动保存。API Key 由 Android Keystore AES-GCM 加密，按完整接口地址隔离；普通 provider.json 仍只含 preset / endpoint / model / vision。圈选手写后点击“渲染公式”即开始识别；导入图片需手动上传。
 

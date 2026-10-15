@@ -1,34 +1,38 @@
 import React, {useEffect, useRef, useState} from 'react';
-import {View, Text, TextInput, Pressable, ScrollView, Alert, Switch, useWindowDimensions} from 'react-native';
+import {View, Text, TextInput, Pressable, ScrollView, Alert, useWindowDimensions} from 'react-native';
 import {SvgXml} from 'react-native-svg';
 import ViewShot, {ViewShotRef} from 'react-native-view-shot';
 import RNFS from 'react-native-fs';
 import {PluginManager} from 'sn-plugin-lib';
 import {FilePicker} from './components/FilePicker';
 import {OcrCrop} from './components/OcrCrop';
-import {ensureFilePermissions, requestDeletePermission} from './permissions';
+import {ensureFilePermissions} from './permissions';
 import {DEFAULT_PREFERENCES, loadPreferences, savePreferences, Preferences} from './preferences';
-import {insertImageWithCleanup} from './insertImage';
+import {insertImage} from './insertImage';
 import {renderEquation} from './src/render';
 import {latexToExpression, plotSvg, plotLayout, Range} from './src/math';
 import {transcribe} from './src/llm';
+import {abortable, RecognitionCancelled} from './src/cancellation';
 import {DEFAULT_PROVIDER, ProviderConfig} from './src/providers';
 import {loadKey, saveKey} from './src/keyStorage';
 import {captureHandwriting, insertRecognizedFormula, Selection} from './src/replacement';
 import {loadProvider, saveProvider} from './src/providerStorage';
 import {ProviderSettings} from './components/ProviderSettings';
+import {KeyboardPage} from './components/KeyboardPage';
 import {FormulaRecord} from './src/history';
-import {exportSelection, loadHistory, savePng, saveRecord} from './src/storage';
+import {loadHistory, savePng, saveRecord} from './src/storage';
 
 type Preview = {svg: string; aspect: number; kind: 'equation' | 'plot'; latex: string; revision: number};
-function Button({title, onPress, disabled = false}: {title: string; onPress: () => void; disabled?: boolean}) {
+function Button({title, onPress, disabled = false, inverted = false}: {title: string; onPress: () => void; disabled?: boolean; inverted?: boolean}) {
   return <Pressable accessibilityRole="button" disabled={disabled} onPress={onPress}
-    style={{borderWidth: 2, borderColor: '#000', padding: 12, marginVertical: 5, minHeight: 48, opacity: disabled ? 0.4 : 1}}>
-    <Text style={{color: '#000', fontSize: 17}}>{title}</Text></Pressable>;
+    style={{backgroundColor: inverted ? '#000' : '#fff', borderWidth: 2, borderColor: '#000', padding: 12, marginVertical: 5, minHeight: 48, opacity: disabled ? 0.4 : 1}}>
+    <Text style={{color: inverted ? '#fff' : '#000', fontSize: 17, textAlign: 'center'}}>{title}</Text></Pressable>;
 }
 const inputStyle = {borderWidth: 1, borderColor: '#000', color: '#000', padding: 10, marginVertical: 6, fontSize: 18};
 export default function App() {
   const [ready, setReady] = useState(false), [busy, setBusy] = useState(false);
+  const recognition = useRef<AbortController | null>(null);
+  const [recognizing, setRecognizing] = useState(false);
   const lock = useRef(false), serial = useRef(0), revision = useRef(0);
   const [tab, setTab] = useState<'equation' | 'plot' | 'ocr' | 'history' | 'settings'>('settings');
   const [latex, setLatex] = useState('y=\\frac{x^{2}+1}{2}');
@@ -37,8 +41,7 @@ export default function App() {
   const [range, setRange] = useState({xmin: '-5', xmax: '5', ymin: '-5', ymax: '5'});
   const [preview, setPreview] = useState<Preview | null>(null), [laidOut, setLaidOut] = useState(false);
   const [status, setStatus] = useState('正在读取设置…'), [picker, setPicker] = useState(false);
-  const [ocrPath, setOcrPath] = useState(''), [source, setSource] = useState<{path: string; hash: string} | null>(null);
-  const [recognizedSource, setRecognizedSource] = useState(false);
+  const [ocrPath, setOcrPath] = useState('');
   const [provider, setProvider] = useState<ProviderConfig>({...DEFAULT_PROVIDER}), [appKey, setAppKey] = useState('');
   const [selectedRecordId, setSelectedRecordId] = useState('');
   const [records, setRecords] = useState<FormulaRecord[]>([]);
@@ -80,7 +83,7 @@ export default function App() {
     try { await action(); } catch (e) { error(e); } finally { lock.current = false; setBusy(false); }
   };
   const openEntry = async (lasso: boolean, plotOnly = false) => {
-    const ticket = ++serial.current; selection.current = null; invalidate(); setPicker(false); setSource(null); setOcrPath(''); setRecognizedSource(false); setAppKey('');
+    const ticket = ++serial.current; selection.current = null; invalidate(); setPicker(false); setOcrPath(''); setAppKey('');
     try {
       await ensureFilePermissions();
       const preferences = await loadPreferences(), history = await loadHistory(), savedProvider = await loadProvider();
@@ -109,14 +112,13 @@ export default function App() {
       received = true; if (!lock.current) { void openEntry(event.id === 200 || event.id === 201, event.id === 201); }
     }});
     if (!received) { void openEntry(false); }
-    return () => { serial.current++; if (saveTimer.current) { void persistSettings().catch(() => {}); } sub.remove(); };
+    return () => { serial.current++; recognition.current?.abort(); if (saveTimer.current) { void persistSettings().catch(() => {}); } sub.remove(); };
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
   const updatePrefs = (change: Partial<Preferences>) => run(async () => {
-    if (change.deleteAfterInsert && !await requestDeletePermission()) { throw new Error('删除权限未授予。'); }
     const next = {...prefs, ...change}; await savePreferences(next); setPrefs(next);
   });
   const chooseFormula = (r: FormulaRecord) => {
-    invalidate(); selection.current = null; setLatex(r.latex); setSource(null);
+    invalidate(); selection.current = null; setLatex(r.latex);
     try { setExpression(latexToExpression(r.latex)); setTab('plot'); setStatus('已选择公式，请生成图像并检查范围。'); }
     catch (e) { setTab('equation'); error(e); }
   };
@@ -135,18 +137,13 @@ export default function App() {
     if (!preview || !laidOut || preview.revision !== revision.current || !shot.current?.capture) { throw new Error('请先生成并检查预览。'); }
     const saved = preview; await ensureFilePermissions();
     const path = await savePng(await shot.current.capture()), hash = await RNFS.hash(path, 'sha256');
-    let deleteOriginal = false;
-    if (saved.kind === 'equation' && prefs.deleteAfterInsert && source && recognizedSource) {
-      deleteOriginal = await RNFS.exists(source.path) && await RNFS.hash(source.path, 'sha256') === source.hash;
-      if (!deleteOriginal) { throw new Error('原图在识别后发生变化或已移走。请关闭自动删除再插入。'); }
-    }
     const handwriting = saved.kind === 'equation' && selection.current;
-    const result = handwriting ? {cleanupWarning: await insertRecognizedFormula(handwriting, path)}
-      : await insertImageWithCleanup(path, source?.path || '', deleteOriginal);
+    const result = handwriting ? {warning: await insertRecognizedFormula(handwriting, path)}
+      : await insertImage(path);
     selection.current = null;
     // Insertion already committed: a history failure must never invite a second insertion.
-    invalidate(); setSource(null); setOcrPath(''); setRecognizedSource(false);
-    let warning = result.cleanupWarning || '';
+    invalidate(); setOcrPath('');
+    let warning = result.warning || '';
     if (saved.kind === 'equation') {
       try {
         await saveRecord({id: path, path, hash, latex: saved.latex, created: Date.now()}); const updated = await loadHistory(); setRecords(updated); setSelectedRecordId(updated[0]?.id || ''); }
@@ -157,34 +154,51 @@ export default function App() {
       [{text: '返回笔记', onPress: () => PluginManager.closePluginView()}, {text: '继续'}]);
   });
   const recognizePath = async (imagePath: string, config: ProviderConfig, key: string) => {
-    setStatus('正在识别选区…');
-    const permission = 'plugin.permission.INTERNET';
-    if (await PluginManager.hasPermission(permission) !== 1) {
-      const granted = await PluginManager.requestPermission(permission, '将当前预览图片发送到你配置的大模型接口以识别公式。');
-      if (granted !== 1 && granted !== 2) { throw new Error('联网权限未授予。'); }
+    const controller = new AbortController();
+    recognition.current = controller; setRecognizing(true);
+    const step = <T,>(action: () => Promise<T>) => abortable(action, controller.signal);
+    try {
+      setStatus('10%……');
+      const permission = 'plugin.permission.INTERNET';
+      if (await step(() => PluginManager.hasPermission(permission)) !== 1) {
+        const granted = await step(() => PluginManager.requestPermission(permission, '将当前预览图片发送到你配置的大模型接口以识别公式。'));
+        if (granted !== 1 && granted !== 2) { throw new Error('联网权限未授予。'); }
+      }
+      setStatus('20%……');
+      const stat = await step(() => RNFS.stat(imagePath));
+      if (Number(stat.size) > 1400000) { throw new Error('图片过大，请先裁剪为单个公式。'); }
+      const data = await step(() => RNFS.readFile(imagePath, 'base64'));
+      const mime = /\.jpe?g$/i.test(imagePath) ? 'image/jpeg' : /\.bmp$/i.test(imagePath) ? 'image/bmp' : 'image/png';
+      const result = await step(() => transcribe({base64: data, mime}, config, key, fetch, {
+        signal: controller.signal, onProgress: percent => { if (!controller.signal.aborted) { setStatus(`${percent}%……`); } },
+      }));
+      if (controller.signal.aborted) { throw new RecognitionCancelled(); }
+      invalidate(); setLatex(result.latex); setTab('equation');
+      setPreview({...renderEquation(result.latex), kind: 'equation', latex: result.latex, revision: revision.current});
+      setStatus('100% · 请核对公式，确认后插入笔记。' + (result.warning ? ` 模型提示：${result.warning}` : ''));
+    } catch (e) {
+      if (controller.signal.aborted || e instanceof RecognitionCancelled) { setStatus('已取消识别，可重新识别或返回笔记。'); }
+      else { setStatus(e instanceof Error ? e.message : '识别失败，请重试。'); throw e; }
+    } finally {
+      if (recognition.current === controller) { recognition.current = null; setRecognizing(false); }
     }
-    const stat = await RNFS.stat(imagePath);
-    if (Number(stat.size) > 1400000) { throw new Error('图片过大，请先裁剪为单个公式。'); }
-    const data = await RNFS.readFile(imagePath, 'base64');
-    const mime = /\.jpe?g$/i.test(imagePath) ? 'image/jpeg' : /\.bmp$/i.test(imagePath) ? 'image/bmp' : 'image/png';
-    const result = await transcribe({base64: data, mime}, config, key);
-    invalidate(); setRecognizedSource(true); setLatex(result.latex); setTab('equation');
-    setPreview({...renderEquation(result.latex), kind: 'equation', latex: result.latex, revision: revision.current});
-    setStatus('请核对公式，确认后插入笔记。' + (result.warning ? ` 模型提示：${result.warning}` : ''));
   };
   const recognizeImage = () => run(() => recognizePath(ocrPath, provider, appKey));
   const previewWidth = preview ? Math.max(1, Math.min(window.width - 40, 360 * preview.aspect)) : 1;
   if (picker && ready) { return <FilePicker onSelect={path => { void run(async () => {
-    selection.current = null; const hash = await RNFS.hash(path, 'sha256'); setRecognizedSource(false); setSource({path, hash}); setOcrPath(path); setPicker(false); setTab('ocr');
+    invalidate(); selection.current = null; setOcrPath(path); setPicker(false); setTab('ocr');
   }); }} onClose={() => setPicker(false)} initialDirectory={prefs.defaultDirectory}
     defaultDirectory={prefs.defaultDirectory} onSetDefaultDirectory={path => { void updatePrefs({defaultDirectory: path}); }} settingsBusy={busy}/>; }
   const pageHeader = <>
     <Text style={{fontSize: 26, fontWeight: 'bold', color: '#000'}}>InkMath</Text>
-    <Text style={{color: '#000', marginVertical: 8}}>{busy ? '处理中，请稍候…' : status}</Text>
-    <Button title="返回笔记" disabled={busy} onPress={() => { void run(async () => { if (saveTimer.current) { await persistSettings(); } else { await pendingSave.current; } PluginManager.closePluginView(); }); }}/>
+    <Text style={{color: '#000', marginVertical: 8}}>{busy && !recognizing ? '处理中，请稍候…' : status}</Text>
+    <View style={{flexDirection: 'row', gap: 8}}>
+      <View style={{flex: 2}}><Button title="返回笔记" disabled={busy} onPress={() => { void run(async () => { if (saveTimer.current) { await persistSettings(); } else { await pendingSave.current; } PluginManager.closePluginView(); }); }}/></View>
+      <View style={{flex: 1}}><Button title="取消识别" inverted disabled={!recognizing} onPress={() => recognition.current?.abort()}/></View>
+    </View>
     {!ready && <Button title="重试初始化" onPress={() => { void openEntry(false); }}/>}
     {ready && <View pointerEvents={busy ? 'none' : 'auto'}>
-      <View style={{flexDirection: 'row', flexWrap: 'wrap', gap: 8}}>{([['settings', 'API 设置'], ['equation', '公式'], ['ocr', '手写识别'], ['plot', '绘图'], ['history', '公式记录']] as const).map(([id, label]) =>
+      <View style={{flexDirection: 'row', flexWrap: 'wrap', gap: 8}}>{([['settings', 'API 设置'], ['equation', '公式'], ['ocr', '图片识别'], ['plot', '绘图'], ['history', '公式记录']] as const).map(([id, label]) =>
         <Button key={id} title={(tab === id ? '● ' : '') + label} onPress={() => { invalidate(); setTab(id); if (id === 'history') { setSelectedRecordId(records[0]?.id || ''); } }}/>)}</View>
     </View>}
   </>;
@@ -203,7 +217,7 @@ export default function App() {
         <Pressable accessibilityRole="button" accessibilityLabel="重新编辑所选公式" disabled={disabled}
           style={{...actionStyle, backgroundColor: '#fff'}} onPress={() => {
             if (!selected) { return; }
-            invalidate(); selection.current = null; setSource(null); setOcrPath(''); setRecognizedSource(false);
+            invalidate(); selection.current = null; setOcrPath('');
             setLatex(selected.latex); setTab('equation'); setStatus('已载入所选公式，可修改 LaTeX 后预览并插入。');
           }}>
           <Text style={{color: '#000', fontSize: 17, textAlign: 'center'}}>重新编辑所选公式</Text>
@@ -217,7 +231,7 @@ export default function App() {
       </ScrollView>
     </View>;
   }
-  return <ScrollView style={{flex: 1, backgroundColor: '#fff'}} contentContainerStyle={{padding: 16}} keyboardShouldPersistTaps="handled">
+  return <KeyboardPage>
     {pageHeader}
     {ready && <View pointerEvents={busy ? 'none' : 'auto'}>
       {tab === 'equation' && <>
@@ -241,19 +255,13 @@ export default function App() {
         <Button title="生成图像" onPress={makePreview}/>
       </>}
       {tab === 'ocr' && <>
-        <Button title="识别当前套索" onPress={() => { void run(async () => {
-          setSource(null); const selected = await captureHandwriting(); selection.current = selected; setOcrPath(selected.image);
-          await recognizePath(selected.image, provider, appKey);
-        }); }}/>
-        <Button title="从预设目录导入截图 / 图片" onPress={() => { setPicker(true); }}/>
+        <Button title="选择图片" onPress={() => { setPicker(true); }}/>
       </>}
       {tab === 'settings' && <ProviderSettings value={provider} onChange={changeProvider} apiKey={appKey} onKey={changeKey}
         onCommit={() => { void persistSettings().catch(error); }} saving={saveStatus}/>}
       {tab === 'ocr' && <>
         {!!ocrPath && <OcrCrop key={ocrPath} path={ocrPath} onCrop={setOcrPath} onError={error}/>}
         <Button title="上传预览图片并识别" disabled={!ocrPath || !provider.model || !provider.endpoint || !appKey} onPress={recognizeImage}/>
-        <Text style={{color: '#000'}}>导入图片在公式成功插入后删除（默认关闭；不删除套索原手写）</Text>
-        <Switch value={prefs.deleteAfterInsert} onValueChange={v => { void updatePrefs({deleteAfterInsert: v}); }}/>
       </>}
       {preview && <>
         <Text style={{color: '#000', marginVertical: 10}}>检查预览；插入后可在笔记中缩放。</Text>
@@ -265,5 +273,5 @@ export default function App() {
         <Button title={preview.kind === 'equation' ? '确认并插入公式' : '插入函数图像'} disabled={!laidOut || busy} onPress={insert}/>
       </>}
     </View>}
-  </ScrollView>;
+  </KeyboardPage>;
 }

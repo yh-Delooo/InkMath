@@ -1,12 +1,5 @@
 import {PluginManager} from 'sn-plugin-lib';
 
-export async function requestDeletePermission(): Promise<boolean> {
-  const permission = 'plugin.permission.FILE:DELETE';
-  if (await PluginManager.hasPermission(permission) === 1) { return true; }
-  const result = await PluginManager.requestPermission(permission, '开启后，仅在图片成功插入笔记后删除所选原图。');
-  return result === 1 || result === 2;
-}
-
 export async function ensureFilePermissions(): Promise<void> {
   for (const permission of ['plugin.permission.FILE:READ', 'plugin.permission.FILE:WRITE']) {
     if ((await PluginManager.hasPermission(permission)) === 1) {
